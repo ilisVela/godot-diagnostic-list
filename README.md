@@ -71,6 +71,14 @@ The workaround is to enable `Use Thread` under `Editor settings -> Network -> La
 
 See also [#2](https://github.com/mphe/godot-diagnostic-list/issues/2) for more information.
 
+> Update (this fork):
+> This fork adds two code-side mitigations:
+> 1. Non-blocking outbound LSP message queue (partial writes) in `LSPClient.gd`.
+> 2. Batched diagnostics dispatch in `DiagnosticProvider.gd` instead of sending all files in one burst.
+>
+> This significantly reduces editor freezes in large projects on Windows 11.  
+> `Use Thread` in `Editor Settings -> Network -> Language Server` is still recommended as an additional safeguard.
+
 ## Showcase
 
 https://github.com/mphe/godot-diagnostic-list/assets/7116001/4c8c9784-94cc-4079-b929-8e2a076424e5

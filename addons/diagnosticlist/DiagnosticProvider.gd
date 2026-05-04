@@ -5,6 +5,13 @@ const IGNORE_FILES: Array[String] = [
     ".gdignore",
     ".diagnostic_ignore",
 ]
+const DEFAULT_IGNORED_DIRS: Array[String] = [
+    "res://.godot",
+    "res://.git",
+    "res://Builds",
+]
+const MAX_SCRIPT_FILES_PER_SCAN: int = 4000
+const DISPATCH_BATCH_SIZE: int = 6
 
 ## Triggered when new diagnostics for a file arrived.
 signal on_publish_diagnostics(diagnostics: DiagnosticList_Diagnostic.Pack)
@@ -33,6 +40,8 @@ var _dirty: bool = true
 var _refresh_time: int = 0
 var _file_cache := {}  # Dict[String, FileCache]
 var _additional_ignore_dirs: Array[String] = []
+var _dispatch_queue: Array[String] = []
+var _dispatch_index: int = 0
 
 
 func _init(client: DiagnosticList_LSPClient) -> void:
@@ -66,7 +75,7 @@ func refresh_diagnostics(force: bool = false) -> bool:
     # NOTE: We always have to do a full update, because a change in one file can cause errors in
     # other files, e.g. renaming an identifier.
 
-    DiagnosticList_Utils.log_debug("Provider: refresh_diagnostics()")
+    DiagnosticList_Utils.log_debug("Provider: refresh_diagnostics(force=%s) dirty=%s outstanding=%d" % [str(force), str(_dirty), _num_outstanding])
 
     # Still waiting for results from the last call
     if _num_outstanding > 0:
@@ -78,6 +87,7 @@ func refresh_diagnostics(force: bool = false) -> bool:
         return false
 
     var files_modified := refresh_file_list()
+    DiagnosticList_Utils.log_debug("Provider: refresh_file_list() => modified=%s scripts=%d cache=%d" % [str(files_modified), _script_paths.size(), _file_cache.size()])
 
     # No files have actually been modified -> Nothing to do
     if not force and not files_modified:
@@ -88,10 +98,12 @@ func refresh_diagnostics(force: bool = false) -> bool:
     _counts = [ 0, 0, 0, 0 ]
     _num_outstanding = len(_script_paths)
     _refresh_time = Time.get_ticks_usec()
+    _dispatch_queue = _script_paths.duplicate()
+    _dispatch_index = 0
 
     if _num_outstanding > 0:
-        for file in _script_paths:
-            _client.update_diagnostics(file, _file_cache[file].content)
+        DiagnosticList_Utils.log_debug("Provider: dispatching didOpen/didClose for %d files in batches of %d" % [_num_outstanding, DISPATCH_BATCH_SIZE])
+        call_deferred("_dispatch_next_batch")
     else:
         call_deferred("_finish_update")
 
@@ -105,11 +117,16 @@ func refresh_diagnostics(force: bool = false) -> bool:
 func refresh_file_list() -> bool:
     var ignore_dirs: Array[String] = []
     ignore_dirs.assign(_additional_ignore_dirs.duplicate())
+    ignore_dirs.append_array(DEFAULT_IGNORED_DIRS)
 
     if ProjectSettings.get("debug/gdscript/warnings/exclude_addons"):
         ignore_dirs.push_back("res://addons" )
 
+    DiagnosticList_Utils.log_debug("Provider: scanning scripts from res:// (ignore_dirs=%s)" % str(ignore_dirs))
     _script_paths = _gather_scripts("res://", ignore_dirs)
+    if _script_paths.size() > MAX_SCRIPT_FILES_PER_SCAN:
+        _script_paths.resize(MAX_SCRIPT_FILES_PER_SCAN)
+        DiagnosticList_Utils.log_error("Provider: script scan capped at %d files to avoid editor stalls" % MAX_SCRIPT_FILES_PER_SCAN)
 
     var modified: bool = false
 
@@ -183,6 +200,7 @@ func _finish_update() -> void:
     _dirty = false
 
     _refresh_time = Time.get_ticks_usec() - _refresh_time
+    DiagnosticList_Utils.log_debug("Provider: _finish_update() refresh_time_usec=%d diagnostics=%d" % [_refresh_time, _diagnostics.size()])
     on_diagnostics_finished.emit()
 
 
@@ -228,6 +246,7 @@ func _on_publish_diagnostics(diagnostics: DiagnosticList_Diagnostic.Pack) -> voi
         return
 
     _diagnostics.append_array(diagnostics.diagnostics)
+    DiagnosticList_Utils.log_debug("Provider: publishDiagnostics uri=%s count=%d outstanding_before=%d" % [str(diagnostics.res_uri), diagnostics.diagnostics.size(), _num_outstanding])
 
     # Increase new diagnostic counts
     for diag in diagnostics.diagnostics:
@@ -252,6 +271,22 @@ func _update_outstanding_counter() -> void:
 
     if _num_outstanding == 0:
         _finish_update()
+
+
+func _dispatch_next_batch() -> void:
+    if _dispatch_index >= _dispatch_queue.size():
+        return
+
+    var end_index: int = mini(_dispatch_index + DISPATCH_BATCH_SIZE, _dispatch_queue.size())
+    for i in range(_dispatch_index, end_index):
+        var file: String = _dispatch_queue[i]
+        var cache: FileCache = _file_cache.get(file)
+        if cache != null:
+            _client.update_diagnostics(file, cache.content)
+    _dispatch_index = end_index
+
+    if _dispatch_index < _dispatch_queue.size():
+        call_deferred("_dispatch_next_batch")
 
 
 # TODO: Consider making ignore_dirs a set if there will ever be more than one entry
@@ -280,8 +315,14 @@ func _gather_scripts(searchpath: String, ignore_dirs: Array[String]) -> Array[St
         if root.current_is_dir():
             if not ignore_dirs.has(path):
                 paths.append_array(_gather_scripts(path, ignore_dirs))
+                if paths.size() >= MAX_SCRIPT_FILES_PER_SCAN:
+                    root.list_dir_end()
+                    return paths
         elif fname.ends_with(".gd"):
             paths.append(path)
+            if paths.size() >= MAX_SCRIPT_FILES_PER_SCAN:
+                root.list_dir_end()
+                return paths
 
         fname = root.get_next()
 

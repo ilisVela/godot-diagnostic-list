@@ -3,7 +3,7 @@ extends RefCounted
 class_name DiagnosticList_Utils
 
 
-const ENABLE_DEBUG_LOG: bool = false
+const ENABLE_DEBUG_LOG: bool = true
 
 
 static func log_debug(text: String) -> void:

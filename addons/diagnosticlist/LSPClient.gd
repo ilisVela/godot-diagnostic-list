@@ -16,6 +16,7 @@ signal on_jsonrpc_error(error: Dictionary)
 
 const TICK_INTERVAL_SECONDS_MIN: float = 0.05
 const TICK_INTERVAL_SECONDS_MAX: float = 30.0
+const MAX_OUTBOUND_MESSAGES_PER_TICK: int = 8
 
 # Godot LS expects a leading "/" in URIs.
 # On Windows, where absolute paths start with C:, it must be added manually.
@@ -26,6 +27,8 @@ var _client := StreamPeerTCP.new()
 var _id: int = 0
 var _timer: Timer
 var _lsp_project_path: String = ""  # Absolute project path reported by LS
+var _outbound_queue: Array[PackedByteArray] = []
+var _outbound_offset: int = 0
 
 
 func _init(root: Node) -> void:
@@ -43,6 +46,8 @@ func disconnect_lsp() -> void:
     DiagnosticList_Utils.log_debug("Disconnecting from LSP")
     _timer.stop()
     _client.disconnect_from_host()
+    _outbound_queue.clear()
+    _outbound_offset = 0
 
 
 ## Connect to the LSP server using host and port specified in the editor config.
@@ -50,6 +55,7 @@ func connect_lsp() -> bool:
     var settings := EditorInterface.get_editor_settings()
     var port: int = settings.get("network/language_server/remote_port")
     var host: String = settings.get("network/language_server/remote_host")
+    DiagnosticList_Utils.log_debug("connect_lsp(): host=%s port=%d" % [host, port])
     return connect_lsp_at(host, port)
 
 
@@ -78,6 +84,7 @@ func is_lsp_connected() -> bool:
 ## Expects "res_path" to be proper res:// uri.
 func update_diagnostics(res_path: String, content: String) -> void:
     var uri := _res_path_to_lsp_uri(res_path)
+    DiagnosticList_Utils.log_debug("update_diagnostics(): %s bytes=%d" % [res_path, content.length()])
 
     _send_notification("textDocument/didOpen", {
         "textDocument": {
@@ -115,6 +122,7 @@ func _on_tick() -> void:
         disconnect_lsp()
         return
 
+    _flush_outbound_queue()
     _update_tick_interval()
 
     while _client.get_available_bytes():
@@ -214,17 +222,26 @@ func _read_header() -> String:
 
 
 func _handle_response(json: Dictionary) -> void:
+    if json.is_empty():
+        DiagnosticList_Utils.log_debug("_handle_response(): empty json")
+        return
+
     var method: String = json.get("method", "")
+    DiagnosticList_Utils.log_debug("_handle_response(): method='%s' has_id=%s has_error=%s" % [method, str(json.has("id")), str(json.has("error"))])
 
     match method:
         # Diagnostics received
         "textDocument/publishDiagnostics":
-            on_publish_diagnostics.emit(_parse_diagnostics(json["params"]))
+            var params_any: Variant = json.get("params", {})
+            if params_any is Dictionary:
+                on_publish_diagnostics.emit(_parse_diagnostics(params_any as Dictionary))
             return
 
         # Project path
         "gdscript_client/changeWorkspace":
-            _lsp_project_path = str(json["params"]["path"]).simplify_path()
+            var ws_params_any: Variant = json.get("params", {})
+            if ws_params_any is Dictionary:
+                _lsp_project_path = str((ws_params_any as Dictionary).get("path", "")).simplify_path()
             return
 
     # Initialization response
@@ -246,19 +263,24 @@ func _handle_response(json: Dictionary) -> void:
 ## https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#publishDiagnosticsParams
 func _parse_diagnostics(params: Dictionary) -> DiagnosticList_Diagnostic.Pack:
     var result := DiagnosticList_Diagnostic.Pack.new()
-    result.res_uri = StringName(_lsp_uri_to_res_path(str(params["uri"])))
+    result.res_uri = StringName(_lsp_uri_to_res_path(str(params.get("uri", ""))))
 
     var diagnostics: Array[Dictionary] = []
-    diagnostics.assign(params["diagnostics"])
+    var diagnostics_any: Variant = params.get("diagnostics", [])
+    if diagnostics_any is Array:
+        diagnostics.assign(diagnostics_any)
 
     for diag in diagnostics:
-        var range_start: Dictionary = diag["range"]["start"]
+        var range_dict: Dictionary = diag.get("range", {})
+        var range_start: Dictionary = range_dict.get("start", {})
         var entry := DiagnosticList_Diagnostic.new()
         entry.res_uri = result.res_uri
-        entry.message = diag["message"]
-        entry.severity = (int(diag["severity"]) - 1) as DiagnosticList_Diagnostic.Severity  # One-based in LSP, hence convert to the zero-based enum value
-        entry.line_start = int(range_start["line"])
-        entry.column_start = int(range_start["character"])
+        entry.message = str(diag.get("message", ""))
+        var severity_raw: int = int(diag.get("severity", 1))
+        var severity_index: int = clampi(severity_raw - 1, 0, 3)
+        entry.severity = severity_index as DiagnosticList_Diagnostic.Severity  # One-based in LSP
+        entry.line_start = int(range_start.get("line", 0))
+        entry.column_start = int(range_start.get("character", 0))
         result.diagnostics.append(entry)
 
     return result
@@ -280,17 +302,57 @@ func _send(json: Dictionary) -> void:
     var header := "Content-Length: %s\r\n\r\n" % len(content_bytes)
     var header_bytes := header.to_ascii_buffer()
     DiagnosticList_Utils.log_debug("Sending message (length: %s): %s" % [ len(content_bytes), content ])
-    var err := _client.put_data(header_bytes + content_bytes)
-
-    if err != OK:
-        DiagnosticList_Utils.log_error("Failed to send: %s" % error_string(err))
+    _outbound_queue.append(header_bytes + content_bytes)
 
     _reset_tick_interval()  # Reset the timer interval because we are expecting a response
 
 
+func _flush_outbound_queue() -> void:
+    if _outbound_queue.is_empty():
+        return
+    if _client.get_status() != StreamPeerTCP.STATUS_CONNECTED:
+        return
+
+    var sent_messages: int = 0
+    while sent_messages < MAX_OUTBOUND_MESSAGES_PER_TICK and not _outbound_queue.is_empty():
+        var packet: PackedByteArray = _outbound_queue[0]
+        var remaining: int = packet.size() - _outbound_offset
+        if remaining <= 0:
+            _outbound_queue.pop_front()
+            _outbound_offset = 0
+            sent_messages += 1
+            continue
+
+        var chunk: PackedByteArray = packet.slice(_outbound_offset)
+        var partial: Array = _client.put_partial_data(chunk)
+        var err: Error = partial[0]
+        var written: int = int(partial[1])
+
+        if err != OK:
+            DiagnosticList_Utils.log_error("Failed partial send: %s" % error_string(err))
+            return
+        if written <= 0:
+            # Socket could not accept more this tick; retry next tick.
+            return
+
+        _outbound_offset += written
+        if _outbound_offset >= packet.size():
+            _outbound_queue.pop_front()
+            _outbound_offset = 0
+            sent_messages += 1
+
+
 func _initialize() -> void:
+    var project_abs_path: String = ProjectSettings.globalize_path("res://").simplify_path()
+    var project_uri: String = URI_PREFIX + project_abs_path
     _send_request("initialize", {
         "processId": null,
+        "rootUri": project_uri,
+        "rootPath": project_abs_path,
+        "workspaceFolders": [{
+            "uri": project_uri,
+            "name": ProjectSettings.get_setting("application/config/name", "Project")
+        }],
         "capabilities": {
             "textDocument": {
                 "publishDiagnostics": {},

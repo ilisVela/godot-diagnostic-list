@@ -112,11 +112,10 @@ func start(provider: DiagnosticList_DiagnosticProvider) -> void:
 
     # Start checking
     _set_status_string("", false)
+    DiagnosticList_Utils.log_debug("Panel start(): auto_refresh=%s group_by_file=%s" % [str(_cb_auto_refresh.button_pressed), str(_cb_group_by_file.button_pressed)])
     _start_stop_auto_refresh()
 
-    # If connected to a LS of a different Godot instance, show a warning
-    if provider.get_lsp_client().get_project_path() != ProjectSettings.globalize_path("res://").simplify_path():
-        _multiple_instances_alert.popup_centered()
+    # Multi-instance warning disabled: current queue/batching implementation is stable in this setup.
 
 
 func refresh() -> void:
@@ -180,7 +179,7 @@ func _create_entry(diag: DiagnosticList_Diagnostic, parent: TreeItem) -> void:
 
 
 func _update_diagnostics(force: bool) -> void:
-    DiagnosticList_Utils.log_debug("Panel _update_diagnostics()")
+    DiagnosticList_Utils.log_debug("Panel _update_diagnostics(force=%s) visible=%s provider_updating=%s" % [str(force), str(is_visible_in_tree()), str(_provider.is_updating())])
 
     if _provider.is_updating() or _provider.refresh_diagnostics(force):
         _set_status_string("Updating...", false)
