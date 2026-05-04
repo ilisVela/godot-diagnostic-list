@@ -14,6 +14,8 @@ class DiagnosticSeveritySettings extends RefCounted:
 
 
 @onready var _btn_refresh_errors: Button = %"btn_refresh_errors"
+@onready var _btn_copy_all: Button = %"btn_copy_all"
+@onready var _btn_copy_selected: Button = %"btn_copy_selected"
 @onready var _error_list_tree: Tree = %"error_tree_list"
 @onready var _cb_auto_refresh: CheckBox = %"cb_auto_refresh"
 @onready var _cb_group_by_file: CheckBox = %"cb_group_by_file"
@@ -39,6 +41,7 @@ class DiagnosticSeveritySettings extends RefCounted:
 @onready var _script_icon: Texture2D = get_theme_icon(&"Script", &"EditorIcons")
 
 var _provider: DiagnosticList_DiagnosticProvider
+var _last_selected_item: TreeItem = null
 
 
 ## Alternative to _ready(). This will be called by plugin.gd to ensure the code in here only runs
@@ -79,6 +82,8 @@ func _plugin_ready() -> void:
     _error_list_tree.set_column_clip_content(1, true)
     _error_list_tree.set_column_clip_content(2, false)
     _error_list_tree.set_column_expand_ratio(0, 4)
+    _error_list_tree.select_mode = Tree.SELECT_MULTI
+    _error_list_tree.gui_input.connect(_on_tree_gui_input)
 
     _multiple_instances_alert.add_button("More Information", true, "https://github.com/mphe/godot-diagnostic-list#does-not-work-correctly-with-multiple-godot-instances")
     _multiple_instances_alert.custom_action.connect(func(action: StringName) -> void: OS.shell_open(action))
@@ -96,6 +101,8 @@ func start(provider: DiagnosticList_DiagnosticProvider) -> void:
     _provider.on_update_progress.connect(_on_update_progress)
 
     _btn_refresh_errors.pressed.connect(_on_force_refresh)
+    _btn_copy_all.pressed.connect(_on_copy_all)
+    _btn_copy_selected.pressed.connect(_on_copy_selected)
     _cb_group_by_file.toggled.connect(_on_group_by_file_toggled)
     _cb_auto_refresh.toggled.connect(_on_auto_refresh_toggled)
     _error_list_tree.item_activated.connect(_on_item_activated)
@@ -228,3 +235,119 @@ func _on_filter_toggled(_toggled_on: bool) -> void:
 
 func _on_group_by_file_toggled(_toggled_on: bool) -> void:
     refresh()
+
+
+func _on_copy_all() -> void:
+    var diagnostics := _provider.get_diagnostics()
+    if diagnostics.is_empty():
+        _set_status_string("Nothing to copy", false)
+        return
+
+    var text := DiagnosticList_Utils.diagnostics_to_string(
+        diagnostics,
+        _get_enabled_severities(),
+        _get_severity_labels()
+    )
+
+    if text.is_empty():
+        _set_status_string("Nothing to copy", false)
+        return
+
+    DisplayServer.clipboard_set(text)
+    var count := text.count("\n") + 1
+    _set_status_string("Copied %d item(s)" % count, false)
+
+
+func _on_copy_selected() -> void:
+    var selected_item := _error_list_tree.get_next_selected(null)
+    if selected_item == null:
+        _set_status_string("Nothing selected", false)
+        return
+
+    var selected_diags: Array[DiagnosticList_Diagnostic] = []
+    var count := 0
+    while selected_item != null:
+        var diag: DiagnosticList_Diagnostic = selected_item.get_metadata(0)
+        if diag != null:
+            selected_diags.append(diag)
+            count += 1
+        selected_item = _error_list_tree.get_next_selected(selected_item)
+
+    var text := DiagnosticList_Utils.diagnostics_to_string(
+        selected_diags,
+        _get_enabled_severities(),
+        _get_severity_labels()
+    )
+
+    if text.is_empty():
+        _set_status_string("Nothing to copy", false)
+        return
+
+    DisplayServer.clipboard_set(text)
+    _set_status_string("Copied %d item(s)" % count, false)
+
+
+func _get_enabled_severities() -> Array[bool]:
+    var enabled: Array[bool] = []
+    for btn in _filter_buttons:
+        enabled.append(btn.button_pressed)
+    return enabled
+
+
+func _get_severity_labels() -> Array[String]:
+    var labels: Array[String] = []
+    for severity in _severity_settings:
+        labels.append(severity.text)
+    return labels
+
+
+func _on_tree_gui_input(event: InputEvent) -> void:
+    if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+        var clicked_item := _error_list_tree.get_item_at_position(event.position)
+        if clicked_item == null:
+            return
+
+        if event.shift_pressed and _last_selected_item != null:
+            # Shift-click: select range
+            _select_range(_last_selected_item, clicked_item)
+            # Consume the event so Tree doesn't deselect
+            _error_list_tree.accept_event()
+        else:
+            # Normal click: update last selected
+            _last_selected_item = clicked_item
+
+
+func _select_range(from_item: TreeItem, to_item: TreeItem) -> void:
+    # Get all items in a flat list
+    var all_items: Array[TreeItem] = []
+    _collect_tree_items(_error_list_tree.get_root(), all_items)
+
+    # Find indices
+    var from_idx := all_items.find(from_item)
+    var to_idx := all_items.find(to_item)
+
+    if from_idx == -1 or to_idx == -1:
+        return
+
+    # Ensure from < to
+    if from_idx > to_idx:
+        var tmp := from_idx
+        from_idx = to_idx
+        to_idx = tmp
+
+    # Select range
+    for i in range(from_idx, to_idx + 1):
+        all_items[i].select(0)
+
+
+func _collect_tree_items(item: TreeItem, result: Array[TreeItem]) -> void:
+    if item == null:
+        return
+
+    # Skip root
+    if item != _error_list_tree.get_root():
+        result.append(item)
+
+    # Process children
+    for child in item.get_children():
+        _collect_tree_items(child, result)
