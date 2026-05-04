@@ -16,6 +16,7 @@ class DiagnosticSeveritySettings extends RefCounted:
 @onready var _btn_refresh_errors: Button = %"btn_refresh_errors"
 @onready var _btn_copy_all: Button = %"btn_copy_all"
 @onready var _btn_copy_selected: Button = %"btn_copy_selected"
+@onready var _search_text: LineEdit = %"search_text"
 @onready var _error_list_tree: Tree = %"error_tree_list"
 @onready var _cb_auto_refresh: CheckBox = %"cb_auto_refresh"
 @onready var _cb_group_by_file: CheckBox = %"cb_group_by_file"
@@ -59,6 +60,7 @@ func _plugin_ready() -> void:
     _filter_buttons[DiagnosticList_Diagnostic.Severity.Hint].hide()
 
     _cb_auto_refresh.button_pressed = DiagnosticList_Settings.get_auto_refresh()
+    _search_text.right_icon = get_theme_icon(&"Search", &"EditorIcons")
 
     _error_list_tree.columns = 3
     _error_list_tree.set_column_title(0, "Message")
@@ -103,6 +105,7 @@ func start(provider: DiagnosticList_DiagnosticProvider) -> void:
     _btn_refresh_errors.pressed.connect(_on_force_refresh)
     _btn_copy_all.pressed.connect(_on_copy_all)
     _btn_copy_selected.pressed.connect(_on_copy_selected)
+    _search_text.text_changed.connect(_on_search_text_changed)
     _cb_group_by_file.toggled.connect(_on_group_by_file_toggled)
     _cb_auto_refresh.toggled.connect(_on_auto_refresh_toggled)
     _error_list_tree.item_activated.connect(_on_item_activated)
@@ -122,7 +125,7 @@ func refresh() -> void:
     DiagnosticList_Utils.log_debug("Panel refresh()")
 
     # NOTE: This list is grouped by file name. This is important as the group-by-file implementation relies on it.
-    var diagnostics := _provider.get_diagnostics()
+    var diagnostics := _get_filtered_diagnostics()
     var group_by_file := _cb_group_by_file.button_pressed
 
     if not group_by_file:
@@ -140,9 +143,6 @@ func refresh() -> void:
     var parent: TreeItem = null
 
     for diag in diagnostics:
-        if not _filter_buttons[diag.severity].button_pressed:
-            continue
-
         # If grouping by file, create header entries if necessary
         if group_by_file and diag.res_uri != last_uri:
             last_uri = diag.res_uri
@@ -237,7 +237,7 @@ func _on_group_by_file_toggled(_toggled_on: bool) -> void:
 
 
 func _on_copy_all() -> void:
-    var diagnostics := _provider.get_diagnostics()
+    var diagnostics := _get_filtered_diagnostics()
     if diagnostics.is_empty():
         _set_status_string("Nothing to copy", false)
         return
@@ -350,3 +350,30 @@ func _collect_tree_items(item: TreeItem, result: Array[TreeItem]) -> void:
     # Process children
     for child in item.get_children():
         _collect_tree_items(child, result)
+
+
+func _on_search_text_changed(_new_text: String) -> void:
+    refresh()
+
+
+func _get_filtered_diagnostics() -> Array[DiagnosticList_Diagnostic]:
+    var all_diagnostics := _provider.get_diagnostics()
+    var filtered: Array[DiagnosticList_Diagnostic] = []
+    var query := _search_text.text.strip_edges().to_lower()
+    var has_query := not query.is_empty()
+
+    for diag in all_diagnostics:
+        if not _filter_buttons[diag.severity].button_pressed:
+            continue
+        if has_query and not _diagnostic_matches_query(diag, query):
+            continue
+        filtered.append(diag)
+    return filtered
+
+
+func _diagnostic_matches_query(diag: DiagnosticList_Diagnostic, query: String) -> bool:
+    return (
+        diag.message.to_lower().contains(query)
+        or diag.get_filename().to_lower().contains(query)
+        or str(diag.res_uri).to_lower().contains(query)
+    )

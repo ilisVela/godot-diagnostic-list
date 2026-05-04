@@ -2,25 +2,24 @@
 
 [ext_resource type="Script" uid="uid://b3dpnradvv4q5" path="res://addons/diagnosticlist/Panel.gd" id="1_fewy8"]
 
-[node name="DiagnosticsPanel" type="Control"]
-custom_minimum_size = Vector2(250, 225)
-layout_mode = 3
-anchors_preset = 15
-anchor_right = 1.0
-anchor_bottom = 1.0
-grow_horizontal = 2
-grow_vertical = 2
+[node name="DiagnosticsPanel" type="VBoxContainer"]
+custom_minimum_size = Vector2(250, 0)
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
 script = ExtResource("1_fewy8")
 
 [node name="HBoxContainer" type="HBoxContainer" parent="."]
-layout_mode = 1
-anchors_preset = 15
-anchor_right = 1.0
-anchor_bottom = 1.0
-grow_horizontal = 2
-grow_vertical = 2
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
 
-[node name="error_tree_list" type="Tree" parent="HBoxContainer"]
+[node name="LeftColumn" type="VBoxContainer" parent="HBoxContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+
+[node name="error_tree_list" type="Tree" parent="HBoxContainer/LeftColumn"]
 unique_name_in_owner = true
 layout_mode = 2
 size_flags_horizontal = 3
@@ -30,6 +29,12 @@ column_titles_visible = true
 hide_root = true
 select_mode = 1
 scroll_horizontal_enabled = false
+
+[node name="search_text" type="LineEdit" parent="HBoxContainer/LeftColumn"]
+unique_name_in_owner = true
+layout_mode = 2
+placeholder_text = "Filter Messages"
+clear_button_enabled = true
 
 [node name="VBoxContainer" type="VBoxContainer" parent="HBoxContainer"]
 layout_mode = 2
@@ -45,6 +50,16 @@ unique_name_in_owner = true
 layout_mode = 2
 auto_translate = false
 text = "Refresh"
+
+[node name="btn_copy_all" type="Button" parent="HBoxContainer/VBoxContainer"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Copy All"
+
+[node name="btn_copy_selected" type="Button" parent="HBoxContainer/VBoxContainer"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Copy Selected"
 
 [node name="HSeparator" type="HSeparator" parent="HBoxContainer/VBoxContainer"]
 layout_mode = 2
